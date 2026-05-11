@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dataclean-tools"
+version = "0.1.0"
+description = "Config-driven image classification cleaning, pre-labeling, and review pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.111",
+  "httpx>=0.27",
+  "numpy>=1.26",
+  "pillow>=10.3",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "rich>=13.7",
+  "scikit-learn>=1.5",
+  "typer>=0.12",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+faiss = ["faiss-cpu>=1.8"]
+dev = ["pytest>=8.2"]
+
+[project.scripts]
+image-labeling = "image_labeling.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/image_labeling"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

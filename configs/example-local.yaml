@@ -1,0 +1,143 @@
+project:
+  id: local_image_classification
+  name: 本地图片分类示例
+  dataset_id: local_dev_dataset
+  run_name: local_mvp
+
+input:
+  type: local_dir
+  local_dir: /data/images
+  recursive: true
+
+storage:
+  artifact_store:
+    type: local
+    root_uri: file:///data/dataclean-artifacts
+
+label_schema:
+  source: yaml
+  schema_id: local_demo_labels_v1
+  task_type: single_label
+  labels:
+    - id: product
+      name: 商品
+      description: 图片主体是商品
+      high_risk: false
+    - id: defect
+      name: 缺陷
+      description: 图片主体存在明显缺陷
+      high_risk: true
+    - id: unknown
+      name: 未知
+      description: 无法判断或不属于配置标签
+      high_risk: false
+  allow_unknown: true
+  unknown_label: unknown
+
+quality:
+  min_width: 64
+  min_height: 64
+  min_pixels: 4096
+  max_aspect_ratio: 6.0
+  min_file_size_bytes: 256
+  allowed_formats: [JPEG, PNG, WEBP, BMP, TIFF]
+  blur:
+    enabled: true
+    edge_variance_threshold: 18.0
+    action: needs_review
+  low_information:
+    enabled: true
+    channel_stddev_threshold: 4.0
+    action: quarantine
+
+thumbnail:
+  size: 256
+  quality: 85
+
+embedding:
+  provider: simple_color
+  model_name: simple-color-histogram
+  model_version: simple-color-histogram-v1
+  batch_size: 128
+  normalize: true
+
+vector_index:
+  backend: faiss
+  metric: cosine
+  index_type: hnsw_flat
+  top_k: 100
+  hnsw:
+    M: 32
+    ef_construction: 200
+    ef_search: 128
+  rerank:
+    enabled: true
+    use_original_vectors: true
+    final_top_k: 20
+  save_index: true
+  allow_exact_fallback: true
+
+clustering:
+  enabled: true
+  algorithm: minibatch_kmeans
+  num_clusters: auto
+  batch_size: 10000
+  max_iter: 100
+  random_state: 42
+  outlier:
+    enabled: true
+    method: distance_to_centroid
+    percentile_threshold: 99.0
+  duplicate_detection:
+    enabled: true
+    embedding_threshold: 0.985
+    phash_hamming_threshold: 4
+  representative:
+    samples_per_cluster: 5
+
+prelabel:
+  provider: multimodal_api
+  provider_config:
+    api_style: openai_compatible
+    model: local-mock
+    mock: true
+    timeout_seconds: 60
+    max_retries: 3
+    rate_limit_qps: 2
+  top_k: 3
+
+auto_decision:
+  min_confidence: 0.9
+  min_margin: 0.15
+  min_cluster_main_label_ratio: 0.8
+  require_cluster_consistency: true
+  block_high_risk_labels: true
+
+review:
+  enabled: true
+  queue:
+    include_low_confidence: true
+    include_outliers: true
+    include_cluster_representatives: true
+    include_duplicate_conflicts: true
+  sampling:
+    auto_accept_qa_ratio: 0.02
+    per_cluster_representatives: 3
+  batch_actions:
+    allow_duplicate_group_accept: true
+    allow_cluster_accept: false
+    max_batch_size: 500
+
+acceptance:
+  auto_accept_precision_target: 0.98
+  final_precision_target: 0.99
+  min_samples_per_core_label: 50
+  report_only: true
+
+output:
+  valid_only_file: valid_annotations.jsonl
+  full_file: final_annotations.jsonl
+
+runtime:
+  sample_limit: 20
+  log_level: INFO

@@ -21,6 +21,7 @@
 - [流水线设计](pipeline-design.md)：接入、质量检测、embedding、HNSW、聚类、预标注、自动采用和导出。
 - [数据与配置设计](data-and-config-design.md)：YAML 配置、PostgreSQL 逻辑模型、对象存储目录、JSONL 契约和断点续跑。
 - [审核界面设计](review-ui-design.md)：最小可用审核台、状态流转、批量操作和抽样查看。
+- [实现状态记录](implementation-status.md)：记录当前代码已完成能力、限制、验证结果和下一步。
 
 ## 第一版必须完成
 
