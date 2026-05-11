@@ -35,6 +35,78 @@ runtime: {}
 
 ## 3. 关键配置
 
+### project 与 input
+
+项目、数据集和运行名称通过 YAML 指定。第一版不在 Web 页面维护项目配置。
+
+```yaml
+project:
+  id: ecommerce_product_classification
+  name: 电商商品分类
+  dataset_id: product_202605
+  run_name: siglip_hnsw_kmeans_v1
+
+input:
+  type: manifest
+  manifest_uri: s3://bucket/image-labeling/datasets/product_202605/input/v1/manifest.jsonl
+```
+
+`project.id` 表示业务项目，`project.dataset_id` 表示输入图片集合，`project.run_name` 只作为可读名称。系统创建运行时生成唯一 `run_id`，不能依赖 `run_name` 做唯一键。
+
+输入支持四种形态：
+
+- `manifest`：生产推荐方式。
+- `path_list`：本地路径清单文件，一行一个图片路径。
+- `object_prefix`：扫描对象存储前缀。
+- `local_dir`：仅用于开发和小规模验证。
+
+`path_list` 示例：
+
+```yaml
+input:
+  type: path_list
+  path_list_uri: file:///data/images/list.txt
+```
+
+对象存储是生产推荐存储。第一版实现可以同时支持 `local` artifact store，用于单机开发和小规模验证；无论输入来源是对象存储还是本地文件，运行时都要生成标准 manifest 并绑定 `run_id`。
+
+输入 manifest 每行一张图，推荐 JSONL 格式：
+
+```json
+{"image_id":"img_001","uri":"s3://bucket/images/001.jpg","metadata":{"source":"batch_a"}}
+```
+
+字段约定：
+
+- `uri`：必填，支持对象存储 URI 或本地 `file://` URI。
+- `image_id`：可选；未提供时由 `dataset_id + uri` 生成稳定 hash。
+- `metadata`：可选，用于保存业务字段、来源、已有弱标签等信息。
+
+本地路径清单每行一个图片路径，空行忽略：
+
+```text
+/data/images/001.jpg
+/data/images/002.jpg
+```
+
+### storage
+
+生产推荐对象存储，开发和小规模验证允许本地 artifact store。
+
+```yaml
+storage:
+  artifact_store:
+    type: s3
+    root_uri: s3://bucket/image-labeling
+```
+
+```yaml
+storage:
+  artifact_store:
+    type: local
+    root_uri: file:///data/image-labeling-artifacts
+```
+
 ### label_schema
 
 标签体系第一版只从 YAML 维护，运行时导入 PostgreSQL 并绑定 run。
@@ -73,6 +145,37 @@ vector_index:
     use_original_vectors: true
     final_top_k: 20
   save_index: true
+```
+
+### embedding
+
+第一版一个 run 只允许一个 embedding provider。模型对比通过创建多个 run 完成。
+
+```yaml
+embedding:
+  provider: siglip
+  model_name: siglip-so400m
+  model_version: siglip-so400m-v1
+  batch_size: 128
+  normalize: true
+```
+
+### prelabel
+
+第一版默认使用多模态 API，接口优先兼容 OpenAI 风格；也支持零样本视觉语言模型。规则 provider 不作为预标注路径。
+
+```yaml
+prelabel:
+  provider: multimodal_api
+  provider_config:
+    api_style: openai_compatible
+    model: ${MULTIMODAL_API_MODEL}
+    timeout_seconds: 60
+    max_retries: 3
+    rate_limit_qps: 2
+    budget:
+      max_requests: 100000
+      max_cost_usd: 100
 ```
 
 ### clustering
@@ -118,7 +221,7 @@ review:
     max_batch_size: 500
 ```
 
-第一版不配置账号、角色、SSO 或 operator。
+第一版 `review.enabled` 必须为 `true`，不支持关闭审核流程。审核完成由用户根据摘要和审核台状态人工判断，系统不自动定义任务完成。第一版不配置账号、角色、SSO 或 operator。
 
 ### acceptance
 
@@ -196,6 +299,19 @@ acceptance:
 - `finished_at`
 - `error_json`
 
+`status` 建议枚举：
+
+- `created`
+- `running`
+- `paused`
+- `review_ready`
+- `exporting`
+- `completed`
+- `failed`
+- `cancelled`
+
+`paused` 用于 `--until` 正常停在指定阶段后的状态，不表示失败。
+
 ### pipeline_stage_runs
 
 保存阶段级状态和指标。
@@ -213,6 +329,18 @@ acceptance:
 - `metrics_json`
 - `started_at`
 - `finished_at`
+
+`status` 建议枚举：
+
+- `pending`
+- `running`
+- `succeeded`
+- `failed`
+- `skipped`
+- `blocked`
+- `needs_recompute`
+
+`blocked` 表示上游产物缺失或失败，当前阶段不能执行。`needs_recompute` 表示上游被 `--force` 重跑后，当前阶段依赖的旧产物不再可信。
 
 ### pipeline_stage_batches
 
@@ -394,6 +522,11 @@ s3://bucket/image-labeling/
   runs/{run_id}/
     config/resolved_config.yaml
     ingest/run_input_manifest.jsonl
+    summaries/{stage}/stage_summary.json
+    summaries/{stage}/sample.jsonl
+    summaries/{stage}/errors.jsonl
+    logs/pipeline.jsonl
+    logs/{stage}/worker-{worker_id}.jsonl
     thumbnails/256/{image_id}.jpg
     quality/quality_results.jsonl
     embeddings/{provider_name}/shard-{shard_id}.parquet
@@ -407,6 +540,8 @@ s3://bucket/image-labeling/
     exports/final_annotations.jsonl
     reports/run_report.json
 ```
+
+`summaries` 和 `logs` 是第一版排查问题的核心入口。CLI 优先读取 PostgreSQL 中的状态和指标；需要样例、错误明细或完整中间结果时，再读取对象存储中的这些产物。
 
 ## 6. 对象存储提交语义
 
@@ -452,6 +587,7 @@ s3://bucket/image-labeling/
     "status": "auto_accepted",
     "final_label": "shoes",
     "source": "ai",
+    "completion_confirmed_by_user": true,
     "updated_at": "2026-05-11T00:00:00Z"
   },
   "trace": {
@@ -474,4 +610,3 @@ s3://bucket/image-labeling/
 - `review_tasks(run_id, status, priority)`
 - `final_annotations(run_id, final_status)`
 - `final_annotations(run_id, final_label)`
-

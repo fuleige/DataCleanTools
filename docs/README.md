@@ -4,7 +4,7 @@
 
 ## 已确认的核心决策
 
-- 任务形态：离线流水线 + 最小审核界面。
+- 任务形态：CLI 一键自动流水线 + 阶段级手动控制 + 最小审核界面。
 - 分类任务：第一版只做单标签分类。
 - 图片规模：按百万级图片设计。
 - 元数据：PostgreSQL 保存状态和摘要。
@@ -12,12 +12,12 @@
 - 配置：YAML 为主来源，Pydantic 做校验；标签体系也以 YAML 为主来源。
 - 向量检索：默认 FAISS `IndexHNSWFlat`，召回后用原始 embedding 精排。
 - 聚类：默认 MiniBatchKMeans/KMeans 类算法。
-- 审核：内网免登录，只保证可视化查看、筛选、改标签、批量接受近重复组、导出结果。
+- 审核：内网免登录，只保证状态摘要、可视化查看、筛选、改标签、批量接受近重复组和结果路径查看。
 - 验收指标：做成可配置默认值，只用于报告和阈值建议，不默认阻断导出。
 
 ## 文档索引
 
-- [总体系统设计](system-design.md)：系统目标、模块边界、运行架构、部署基线和第一版非目标。
+- [总体系统设计](system-design.md)：系统目标、模块边界、运行入口、部署基线和第一版非目标。
 - [流水线设计](pipeline-design.md)：接入、质量检测、embedding、HNSW、聚类、预标注、自动采用和导出。
 - [数据与配置设计](data-and-config-design.md)：YAML 配置、PostgreSQL 逻辑模型、对象存储目录、JSONL 契约和断点续跑。
 - [审核界面设计](review-ui-design.md)：最小可用审核台、状态流转、批量操作和抽样查看。
@@ -25,11 +25,14 @@
 ## 第一版必须完成
 
 - 图片输入 manifest 或对象存储前缀接入。
+- 本地路径清单和本地目录输入，用于开发和小规模验证。
+- 配置校验、run 启动、状态查询、失败恢复和导出 CLI。
+- CLI 查看中间结果、阶段摘要、结构化日志和 artifact 路径。
 - 可配置图片质量过滤。
-- embedding provider 抽象，支持 DINOv2、SigLIP、CLIP 类模型。
+- embedding provider 抽象，支持 DINOv2、SigLIP、CLIP 类模型；一个 run 只启用一个 embedding provider。
 - FAISS HNSW 相似检索和原始向量精排。
 - MiniBatchKMeans/KMeans 语义聚类。
-- 本地模型和多模态 API 的预标注 provider 抽象。
+- 默认多模态 API 和零样本视觉语言模型的预标注 provider 抽象。
 - 保守自动采用规则和人工审核队列。
 - 最小可用审核界面。
 - Manifest + JSONL 最终结果导出。
@@ -44,4 +47,3 @@
 - Kubernetes 生产部署。
 - 复杂多标签、层级标签生产流程。
 - 完整替代 Label Studio/CVAT 的通用标注平台。
-
