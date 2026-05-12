@@ -96,3 +96,29 @@
 - 增加批处理粒度和断点恢复，避免大数据集单阶段失败后整体重跑。
 - 增加对象存储适配，至少支持 S3/MinIO artifact store。
 - 进行更大规模的本地性能压测，确认 HNSW、聚类、日志和中间产物体积。
+
+## 2026-05-12 CLI 运行进度可视化
+
+### 已完成
+
+- `run start`、`run resume`、`stage run` 增加默认开启的 Rich 实时进度显示，可通过 `--no-progress` 关闭。
+- `ingest` 阶段在递归扫描本地目录和构建 manifest 时上报进度。
+- `quality_check` 阶段按已处理图片数上报进度。
+- `state.json` 中的阶段状态增加 `processed_items`，`run status` 表格增加 `processed` 列，便于另一个终端查看当前处理到哪里。
+- 本地目录输入在已是绝对路径时直接生成 `file://` URI，避免百万级文件逐个 `resolve()` 带来的额外开销。
+- `input.compute_content_hash` 默认关闭；需要内容哈希时可显式开启，避免初筛任务在质量检查前额外完整读取所有图片文件。
+- `ingest` 写 manifest、`quality_check` 写 quality results 改为流式写 JSONL，降低百万级图片运行时的内存占用。
+- `quality_check` 支持 `runtime.quality_check_executor` 选择 `process` 或 `thread`，默认 `process`；`runtime.quality_check_workers` 表示进程/线程数量，默认 8；设置 workers 为 1 时退回单进程顺序处理。
+- `process` 模式优先使用 `forkserver` 进程上下文，不可用时退到 `spawn`，避免在已有线程的父进程中直接 `fork`。
+- `quality_check` 支持本地分片 checkpoint：`runtime.quality_check_shard_size` 默认 10000，`runtime.quality_check_resume_shards` 默认开启。恢复时会复用已成功且校验通过的 shard，只重跑缺失、失败、配置不匹配或行数不匹配的 shard，最后合并为原有 `data/quality_results.jsonl`。
+- `run resume` 默认沿用原始 `run start` 的 `--until/--from-stage` 边界，也支持在 resume 命令上显式覆盖。
+- checkpoint 读取会跳过损坏 JSONL 行，避免异常中断后最后一条半写记录阻断恢复。
+- `quality_check` 的 shard 复用增加轻量实现版本常量，防止质量检查代码变更后误用旧 shard。
+- `quality_check` 和 `thumbnail` 的错误输出改为流式写入；`embedding`、`auto_decision` 对仍需内存加载的输入增加 `runtime.max_in_memory_rows` 风险保护。
+- `KeyboardInterrupt` 中断运行时会把当前阶段和 run 标记为 `aborted`，避免状态文件长期显示 `running`。
+
+### 已验证
+
+- `/data/envs/dataclean-tools/bin/python -m pytest` 通过，结果为 `4 passed`。
+- `configs/example-local.yaml` 通过 `image-labeling config validate`。
+- MEP-3M 商品分类初筛 run 已验证 `ingest` 可完成递归扫描；`quality_check` 手动中断后状态会落为 `aborted`，已成功 shard 可由 checkpoint 复用。

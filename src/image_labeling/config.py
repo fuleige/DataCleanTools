@@ -46,6 +46,7 @@ class InputConfig(StrictModel):
     extensions: list[str] = Field(
         default_factory=lambda: [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"]
     )
+    compute_content_hash: bool = False
 
     @model_validator(mode="after")
     def required_source(self) -> "InputConfig":
@@ -265,6 +266,11 @@ class OutputConfig(StrictModel):
 class RuntimeConfig(StrictModel):
     sample_limit: int = 20
     log_level: str = "INFO"
+    quality_check_executor: Literal["process", "thread"] = "process"
+    quality_check_workers: int = Field(default=8, ge=1)
+    quality_check_shard_size: int = Field(default=10000, ge=1)
+    quality_check_resume_shards: bool = True
+    max_in_memory_rows: int = Field(default=500000, ge=1)
 
 
 class PipelineConfig(StrictModel):

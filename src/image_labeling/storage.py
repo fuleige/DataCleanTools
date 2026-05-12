@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ class RunContext:
     run_dir: Path
     state: dict[str, Any]
     logger: PipelineLogger
+    progress_callback: Callable[[dict[str, Any]], None] | None = None
 
     def path(self, *parts: str) -> Path:
         return self.run_dir.joinpath(*parts)
@@ -67,6 +69,26 @@ class RunContext:
     def save_state(self) -> None:
         self.state["updated_at"] = utc_now()
         write_json(self.path("state.json"), self.state)
+
+    def report_progress(self, event: str, **payload: Any) -> None:
+        if self.progress_callback:
+            self.progress_callback({"event": event, **payload})
+
+    def update_stage_progress(
+        self,
+        stage: str,
+        *,
+        processed_items: int | None = None,
+        total_items: int | None = None,
+        **extra: Any,
+    ) -> None:
+        stage_state = self.state.setdefault("stages", {}).setdefault(stage, {})
+        if processed_items is not None:
+            stage_state["processed_items"] = processed_items
+        if total_items is not None:
+            stage_state["total_items"] = total_items
+        stage_state.update(extra)
+        self.save_state()
 
     def add_artifact(
         self,
@@ -99,13 +121,23 @@ class RunContext:
         *,
         sample: list[dict[str, Any]] | None = None,
         errors: list[dict[str, Any]] | None = None,
+        errors_prewritten: bool = False,
+        errors_count: int | None = None,
     ) -> None:
         write_json(self.summary_path(stage), summary)
         write_jsonl(self.sample_path(stage), sample or [])
-        write_jsonl(self.errors_path(stage), errors or [])
+        if not errors_prewritten:
+            write_jsonl(self.errors_path(stage), errors or [])
+        elif not self.errors_path(stage).exists():
+            write_jsonl(self.errors_path(stage), [])
         self.add_artifact(name=f"{stage}_summary", stage=stage, path=self.summary_path(stage), records=1)
         self.add_artifact(name=f"{stage}_sample", stage=stage, path=self.sample_path(stage), records=len(sample or []))
-        self.add_artifact(name=f"{stage}_errors", stage=stage, path=self.errors_path(stage), records=len(errors or []))
+        self.add_artifact(
+            name=f"{stage}_errors",
+            stage=stage,
+            path=self.errors_path(stage),
+            records=errors_count if errors_count is not None else len(errors or []),
+        )
 
 
 def _run_dir(root: Path, config: PipelineConfig, run_id: str) -> Path:

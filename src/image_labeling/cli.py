@@ -9,6 +9,7 @@ import typer
 import uvicorn
 from rich.console import Console
 from rich.json import JSON
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.table import Table
 
 from .api import create_app
@@ -35,6 +36,66 @@ app.add_typer(report_app, name="report")
 app.add_typer(api_app, name="api")
 
 
+def _new_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    )
+
+
+class CliProgressReporter:
+    def __init__(self, progress: Progress) -> None:
+        self.progress = progress
+        self.tasks: dict[str, int] = {}
+
+    def __call__(self, event: dict) -> None:
+        kind = event.get("event")
+        if kind == "run_created":
+            self.progress.console.print(f"run_id: [bold]{event.get('run_id')}[/bold]")
+            self.progress.console.print(f"run_dir: {event.get('run_dir')}")
+            return
+        if kind == "stage_started":
+            self.progress.console.print(f"[cyan]stage started[/cyan] {event.get('stage')}")
+            return
+        if kind == "stage_completed":
+            self.progress.console.print(f"[green]stage completed[/green] {event.get('stage')}")
+            return
+        if kind == "stage_failed":
+            self.progress.console.print(f"[red]stage failed[/red] {event.get('stage')}: {event.get('message')}")
+            return
+
+        key = str(event.get("key") or kind)
+        description = str(event.get("description") or key)
+        if kind == "task_started":
+            self.tasks[key] = self.progress.add_task(description, total=event.get("total"))
+            return
+
+        task_id = self.tasks.get(key)
+        if task_id is None:
+            task_id = self.progress.add_task(description, total=event.get("total"))
+            self.tasks[key] = task_id
+
+        if kind == "task_advance":
+            self.progress.update(task_id, description=description)
+            self.progress.advance(task_id, int(event.get("advance") or 1))
+            return
+
+        if kind == "task_completed":
+            update = {"description": description}
+            if event.get("total") is not None:
+                update["total"] = event["total"]
+            if event.get("completed") is not None:
+                update["completed"] = event["completed"]
+            self.progress.update(task_id, **update)
+            self.progress.stop_task(task_id)
+            self.progress.update(task_id, visible=False)
+
+
 @config_app.command("validate")
 def validate_config(config: Path = typer.Option(..., "-c", "--config", exists=True, readable=True)) -> None:
     loaded = load_config(config)
@@ -49,8 +110,20 @@ def start(
     until: Optional[str] = typer.Option(None, "--until", help=f"Stop after a stage: {', '.join(AUTO_STAGES)}"),
     from_stage: Optional[str] = typer.Option(None, "--from-stage", help="Start from a stage in the new run."),
     force: bool = typer.Option(False, "--force", help="Rerun stages even if they already succeeded."),
+    progress: bool = typer.Option(True, "--progress/--no-progress", help="Show live stage and item progress."),
 ) -> None:
-    ctx = start_run(load_config(config), artifact_root=artifact_root, until=until, from_stage=from_stage, force=force)
+    if progress:
+        with _new_progress() as progress_bar:
+            ctx = start_run(
+                load_config(config),
+                artifact_root=artifact_root,
+                until=until,
+                from_stage=from_stage,
+                force=force,
+                progress_callback=CliProgressReporter(progress_bar),
+            )
+    else:
+        ctx = start_run(load_config(config), artifact_root=artifact_root, until=until, from_stage=from_stage, force=force)
     console.print(f"run_id: [bold]{ctx.run_id}[/bold]")
     console.print(f"status: {ctx.state['status']}")
     console.print(f"run_dir: {ctx.run_dir}")
@@ -61,9 +134,23 @@ def start(
 def resume(
     run_id: str = typer.Option(..., "--run-id"),
     artifact_root: Optional[str] = typer.Option(None, "--artifact-root"),
+    until: Optional[str] = typer.Option(None, "--until", help=f"Stop after a stage: {', '.join(AUTO_STAGES)}"),
+    from_stage: Optional[str] = typer.Option(None, "--from-stage", help="Override resume start stage."),
     force: bool = typer.Option(False, "--force"),
+    progress: bool = typer.Option(True, "--progress/--no-progress", help="Show live stage and item progress."),
 ) -> None:
-    ctx = resume_run(run_id, artifact_root=artifact_root, force=force)
+    if progress:
+        with _new_progress() as progress_bar:
+            ctx = resume_run(
+                run_id,
+                artifact_root=artifact_root,
+                until=until,
+                from_stage=from_stage,
+                force=force,
+                progress_callback=CliProgressReporter(progress_bar),
+            )
+    else:
+        ctx = resume_run(run_id, artifact_root=artifact_root, until=until, from_stage=from_stage, force=force)
     console.print(f"run_id: [bold]{ctx.run_id}[/bold]")
     console.print(f"status: {ctx.state['status']}")
 
@@ -92,11 +179,12 @@ def status(run_id: str = typer.Option(..., "--run-id"), artifact_root: Optional[
     for key in ["run_id", "status", "current_stage", "created_at", "started_at", "finished_at", "config_snapshot_uri", "input_manifest_uri"]:
         table.add_row(key, str(state.get(key)))
     console.print(table)
-    stage_table = Table("stage", "status", "total", "succeeded", "failed", "duration_ms")
+    stage_table = Table("stage", "status", "processed", "total", "succeeded", "failed", "duration_ms")
     for stage, item in state.get("stages", {}).items():
         stage_table.add_row(
             stage,
             str(item.get("status")),
+            str(item.get("processed_items") or ""),
             str(item.get("total_items")),
             str(item.get("succeeded_items")),
             str(item.get("failed_items")),
@@ -148,8 +236,19 @@ def stage_run(
     stage: str = typer.Option(..., "--stage"),
     artifact_root: Optional[str] = typer.Option(None, "--artifact-root"),
     force: bool = typer.Option(False, "--force"),
+    progress: bool = typer.Option(True, "--progress/--no-progress", help="Show live stage and item progress."),
 ) -> None:
-    ctx = run_single_stage(run_id, stage, artifact_root=artifact_root, force=force)
+    if progress:
+        with _new_progress() as progress_bar:
+            ctx = run_single_stage(
+                run_id,
+                stage,
+                artifact_root=artifact_root,
+                force=force,
+                progress_callback=CliProgressReporter(progress_bar),
+            )
+    else:
+        ctx = run_single_stage(run_id, stage, artifact_root=artifact_root, force=force)
     console.print(f"run_id: [bold]{ctx.run_id}[/bold]")
     console.print(f"stage: {stage}")
     console.print(f"status: {ctx.state['stages'][stage]['status']}")

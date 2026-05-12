@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from .logging_utils import duration_ms, utc_now
 from .stages import (
@@ -22,6 +22,7 @@ from .storage import RunContext, create_run, load_run
 
 
 StageFn = Callable[[RunContext], None]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 AUTO_STAGES: list[str] = [
@@ -64,20 +65,44 @@ def start_run(
     until: str | None = None,
     from_stage: str | None = None,
     force: bool = False,
+    progress_callback: ProgressCallback | None = None,
 ) -> RunContext:
     ctx = create_run(config, artifact_root=artifact_root)
+    ctx.progress_callback = progress_callback
+    ctx.report_progress("run_created", run_id=ctx.run_id, run_dir=str(ctx.run_dir))
     run_stages(ctx, AUTO_STAGES, until=until, from_stage=from_stage, force=force)
     return ctx
 
 
-def resume_run(run_id: str, *, artifact_root: str | None = None, force: bool = False) -> RunContext:
+def resume_run(
+    run_id: str,
+    *,
+    artifact_root: str | None = None,
+    until: str | None = None,
+    from_stage: str | None = None,
+    force: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> RunContext:
     ctx = load_run(run_id, artifact_root=artifact_root)
-    run_stages(ctx, AUTO_STAGES, force=force, resume=True)
+    ctx.progress_callback = progress_callback
+    if until is None and from_stage is None:
+        execution = ctx.state.get("execution") or {}
+        until = execution.get("until")
+        from_stage = execution.get("from_stage")
+    run_stages(ctx, AUTO_STAGES, until=until, from_stage=from_stage, force=force, resume=True)
     return ctx
 
 
-def run_single_stage(run_id: str, stage: str, *, artifact_root: str | None = None, force: bool = False) -> RunContext:
+def run_single_stage(
+    run_id: str,
+    stage: str,
+    *,
+    artifact_root: str | None = None,
+    force: bool = False,
+    progress_callback: ProgressCallback | None = None,
+) -> RunContext:
     ctx = load_run(run_id, artifact_root=artifact_root)
+    ctx.progress_callback = progress_callback
     if stage not in STAGE_FUNCTIONS:
         raise ValueError(f"Unknown stage: {stage}")
     _run_stage(ctx, stage, force=force)
@@ -110,6 +135,13 @@ def run_stages(
     resume: bool = False,
 ) -> RunContext:
     selected = _select_stages(stages, until=until, from_stage=from_stage)
+    if not resume:
+        ctx.state["execution"] = {
+            "stages": list(stages),
+            "until": until,
+            "from_stage": from_stage,
+            "selected_stages": selected,
+        }
     ctx.state["status"] = "running"
     ctx.state["started_at"] = ctx.state.get("started_at") or utc_now()
     ctx.save_state()
@@ -156,10 +188,12 @@ def _run_stage(ctx: RunContext, stage: str, *, force: bool = False) -> None:
             "artifact_uri": None,
             "metrics_json": {},
             "error_json": None,
+            "force": force,
         }
     )
     ctx.save_state()
     ctx.logger.log(stage, "stage_started", f"{stage} started")
+    ctx.report_progress("stage_started", stage=stage)
     try:
         STAGE_FUNCTIONS[stage](ctx)
         end = utc_now()
@@ -177,6 +211,7 @@ def _run_stage(ctx: RunContext, stage: str, *, force: bool = False) -> None:
             }
         )
         ctx.logger.log(stage, "stage_completed", f"{stage} completed", metrics={"duration_ms": stage_state["duration_ms"]})
+        ctx.report_progress("stage_completed", stage=stage)
     except Exception as exc:  # noqa: BLE001
         end = utc_now()
         stage_state.update(
@@ -191,6 +226,24 @@ def _run_stage(ctx: RunContext, stage: str, *, force: bool = False) -> None:
         ctx.state["status"] = "failed"
         ctx.state["error_json"] = {"stage": stage, "error_code": exc.__class__.__name__, "message": str(exc)}
         ctx.logger.log(stage, "stage_failed", str(exc), level="ERROR", error_code=exc.__class__.__name__)
+        ctx.report_progress("stage_failed", stage=stage, message=str(exc))
+        ctx.save_state()
+        raise
+    except KeyboardInterrupt:
+        end = utc_now()
+        stage_state.update(
+            {
+                "status": "aborted",
+                "finished_at": end,
+                "duration_ms": duration_ms(start, end),
+                "error_json": {"error_code": "KeyboardInterrupt", "message": "interrupted by user"},
+            }
+        )
+        ctx.state["status"] = "aborted"
+        ctx.state["finished_at"] = end
+        ctx.state["error_json"] = {"stage": stage, "error_code": "KeyboardInterrupt", "message": "interrupted by user"}
+        ctx.logger.log(stage, "stage_aborted", "interrupted by user", level="WARNING", error_code="KeyboardInterrupt")
+        ctx.report_progress("stage_failed", stage=stage, message="interrupted by user")
         ctx.save_state()
         raise
     ctx.save_state()

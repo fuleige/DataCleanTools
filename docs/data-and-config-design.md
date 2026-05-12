@@ -30,7 +30,14 @@ auto_decision: {}
 review: {}
 acceptance: {}
 output: {}
-runtime: {}
+runtime:
+  sample_limit: 20
+  log_level: INFO
+  quality_check_executor: process
+  quality_check_workers: 8
+  quality_check_shard_size: 10000
+  quality_check_resume_shards: true
+  max_in_memory_rows: 500000
 ```
 
 ## 3. 关键配置
