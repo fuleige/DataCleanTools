@@ -96,10 +96,14 @@ def test_resume_respects_start_until_boundary(tmp_path: Path) -> None:
     assert ctx.state["execution"]["until"] == "quality_check"
     ctx.state["stages"]["quality_check"]["status"] = "failed"
     ctx.state["status"] = "failed"
+    ctx.state["finished_at"] = "2026-01-01T00:00:00Z"
+    ctx.state["error_json"] = {"stage": "quality_check", "error_code": "SyntheticFailure", "message": "old error"}
     ctx.path("data", "quality_results.jsonl").unlink()
     ctx.save_state()
 
     resumed = resume_run(ctx.run_id, artifact_root=(tmp_path / "artifacts").as_uri())
     assert resumed.state["status"] == "paused"
     assert resumed.state["current_stage"] == "quality_check"
+    assert resumed.state["finished_at"] != "2026-01-01T00:00:00Z"
+    assert resumed.state["error_json"] is None
     assert "thumbnail" not in resumed.state["stages"]

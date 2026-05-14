@@ -2,6 +2,18 @@
 
 本文档用于记录当前代码实现到什么程度、哪些设计已经落地、哪些能力仍未完成。后续每次推进核心能力、改变运行方式或调整技术边界时，都应同步维护本文件。
 
+## 2026-05-14 示例配置注释完善
+
+### 已完成
+
+- 补全 `configs/example-local.yaml` 的配置说明注释，覆盖输入源、产物存储、标签体系、质量检测、缩略图、embedding、向量索引、聚类、预标注、自动决策、审核、验收、导出和运行时参数。
+- 在注释中补充主要枚举候选值、建议范围、阈值含义、动作优先级和工程使用建议。
+- 将部分原本依赖代码默认值的常用字段显式写入示例配置，例如 `input.extensions`、`input.compute_content_hash`、`embedding.include_quality_statuses` 和 `prelabel.prompt_version`，方便复制后直接修改。
+
+### 已验证
+
+- `/data/envs/dataclean-tools/bin/image-labeling config validate -c configs/example-local.yaml` 通过。
+
 ## 2026-05-11 第一版本地 MVP
 
 ### 本版本定位
@@ -112,6 +124,7 @@
 - `process` 模式优先使用 `forkserver` 进程上下文，不可用时退到 `spawn`，避免在已有线程的父进程中直接 `fork`。
 - `quality_check` 支持本地分片 checkpoint：`runtime.quality_check_shard_size` 默认 10000，`runtime.quality_check_resume_shards` 默认开启。恢复时会复用已成功且校验通过的 shard，只重跑缺失、失败、配置不匹配或行数不匹配的 shard，最后合并为原有 `data/quality_results.jsonl`。
 - `run resume` 默认沿用原始 `run start` 的 `--until/--from-stage` 边界，也支持在 resume 命令上显式覆盖。
+- `run resume` 进入 running 时会清理旧的 run-level `finished_at/error_json`，正常停在 `paused/review_ready` 时重新写入新的完成时间，避免中断恢复后状态页显示旧错误时间。
 - checkpoint 读取会跳过损坏 JSONL 行，避免异常中断后最后一条半写记录阻断恢复。
 - `quality_check` 的 shard 复用增加轻量实现版本常量，防止质量检查代码变更后误用旧 shard。
 - `quality_check` 和 `thumbnail` 的错误输出改为流式写入；`embedding`、`auto_decision` 对仍需内存加载的输入增加 `runtime.max_in_memory_rows` 风险保护。

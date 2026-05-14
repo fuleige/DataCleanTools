@@ -144,6 +144,8 @@ def run_stages(
         }
     ctx.state["status"] = "running"
     ctx.state["started_at"] = ctx.state.get("started_at") or utc_now()
+    ctx.state["finished_at"] = None
+    ctx.state["error_json"] = None
     ctx.save_state()
     for stage in selected:
         current_status = ctx.state.get("stages", {}).get(stage, {}).get("status")
@@ -155,6 +157,8 @@ def run_stages(
     else:
         ctx.state["status"] = "review_ready" if stages == AUTO_STAGES else ctx.state["status"]
     ctx.state["current_stage"] = selected[-1] if selected else ctx.state.get("current_stage")
+    if ctx.state.get("status") in {"paused", "review_ready"}:
+        ctx.state["finished_at"] = utc_now()
     ctx.save_state()
     return ctx
 

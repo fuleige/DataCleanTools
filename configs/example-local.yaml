@@ -1,148 +1,492 @@
+# 本地离线图片清洗/标注示例配置。
+#
+# 使用方式：
+#   1. 复制本文件到 /data/codes/DataCleanRuns/<task>/config.yaml。
+#   2. 修改 project、input、storage.artifact_store.root_uri 和 label_schema。
+#   3. 执行：
+#      /data/envs/dataclean-tools/bin/image-labeling config validate -c <config.yaml>
+#      /data/envs/dataclean-tools/bin/image-labeling run start -c <config.yaml>
+#
+# 说明：
+#   - YAML 中 true/false 是布尔值；比例型阈值通常使用 0.0-1.0。
+#   - 带 URI 的本地路径通常写成 file:///absolute/path；普通路径字段可以写 /absolute/path。
+#   - action 候选值统一为：
+#       keep          保留，不改变图片状态；通常只用于临时关闭某个规则的影响。
+#       needs_review 进入人工复核；适合误判风险较高的规则，例如模糊图。
+#       quarantine   隔离；适合明显异常但希望保留证据的图片，例如纯色图。
+#       drop         丢弃；适合解码失败、过小、格式不支持等确定不可用图片。
+#   - 如果同一图片命中多个规则，最终状态按优先级取最高：
+#       keep < needs_review < quarantine < drop。
+
 project:
+  # 项目 ID。用于 artifact 路径分组，建议只用小写字母、数字、下划线。
+  # 示例：product_classification、mep3m_cleaning、local_image_classification。
   id: local_image_classification
+
+  # 展示名称，只用于人读日志/报表，不参与路径和算法。
   name: 本地图片分类示例
+
+  # 数据集 ID。用于 artifact 路径分组；同一批输入和标签体系建议使用稳定 ID。
   dataset_id: local_dev_dataset
+
+  # 本次运行名称。用于区分同一项目下的不同实验/任务。
   run_name: local_mvp
 
 input:
+  # 输入类型候选值：
+  #   local_dir     从本地目录扫描图片；最常用。
+  #   path_list     从 txt 文件读取图片路径；每行一个本地路径或 file:// URI。
+  #   manifest      从 JSONL manifest 读取；每行至少包含 uri，可选 image_id/metadata。
+  #   object_prefix 当前实现仍按本地路径/本地 URI 解析，尚不是远程对象存储扫描。
   type: local_dir
+
+  # type=local_dir 时必填。可以是绝对路径；建议使用任务真实图片根目录。
   local_dir: /data/images
+
+  # type=path_list 时使用；示例：file:///data/codes/DataCleanRuns/task/images.txt。
+  # path_list_uri: file:///absolute/path/images.txt
+
+  # type=manifest 时使用；manifest 每行是 JSON，例如：
+  # {"image_id":"optional_id","uri":"file:///data/images/a.jpg","metadata":{"source":"x"}}
+  # manifest_uri: file:///absolute/path/manifest.jsonl
+
+  # type=object_prefix 时使用；当前版本仅适合作为本地目录 URI。
+  # object_prefix_uri: file:///absolute/path/images
+
+  # 是否递归扫描子目录。local_dir/object_prefix 有效。
+  #   true  扫描所有嵌套子目录，适合真实数据集。
+  #   false 只扫描当前目录一层。
   recursive: true
+
+  # 允许扫描的图片后缀。代码会对文件后缀做小写归一化，所以 .JPG/.jpg 都能匹配。
+  # 常用候选：.jpg、.jpeg、.png、.webp、.bmp、.tif、.tiff。
+  extensions: [.jpg, .jpeg, .png, .webp, .bmp, .tif, .tiff]
+
+  # 是否在 ingest 阶段计算文件内容哈希。
+  #   false 默认值，速度快，适合百万级初筛。
+  #   true  会读取完整文件计算哈希，便于强去重/审计，但会明显增加 IO。
+  compute_content_hash: false
 
 storage:
   artifact_store:
+    # artifact 存储类型。候选值：local、s3。
+    # 当前代码只支持 local；配置为 s3 会在校验时报错。
     type: local
+
+    # 本地 artifact 根目录。每次 run 的 resolved_config、state、JSONL、缩略图等都会写到这里。
+    # 建议任务运行时写到 /data/codes/DataCleanRuns/<task>/artifacts，避免污染源码目录。
     root_uri: file:///data/dataclean-artifacts
 
 label_schema:
+  # 标签来源。当前候选值只有 yaml，表示标签直接写在本配置中。
   source: yaml
+
+  # 标签体系版本 ID。修改标签集合、含义或高风险标记时应升级。
   schema_id: local_demo_labels_v1
+
+  # 标注任务类型。当前候选值只有 single_label，表示每张图片最终只选一个主标签。
   task_type: single_label
+
+  # 标签列表。
+  # id: 稳定机器可读 ID，建议小写英文/数字/下划线。
+  # name: 展示名。
+  # aliases: 可选别名，帮助后续 prompt 或人工理解。
+  # description: 标签判定说明。
+  # high_risk: true 时自动采用阶段会更保守，默认不自动放行高风险标签。
   labels:
     - id: product
       name: 商品
+      aliases: []
       description: 图片主体是商品
       high_risk: false
     - id: defect
       name: 缺陷
+      aliases: []
       description: 图片主体存在明显缺陷
       high_risk: true
     - id: unknown
       name: 未知
+      aliases: []
       description: 无法判断或不属于配置标签
       high_risk: false
+
+  # 是否允许 unknown 标签。
+  #   true  如果 unknown_label 不在 labels 里，加载配置时会自动补一个 Unknown 标签。
+  #   false 预标注/人工审核不应输出 unknown_label。
   allow_unknown: true
+
+  # 未知类标签 ID。allow_unknown=true 时应和 labels 中某个 id 一致，或允许系统自动补齐。
   unknown_label: unknown
 
 quality:
+  # 最小宽度，单位像素。低于该值会 drop，reason=image_too_small。
+  # 常用范围：
+  #   32-64    图标/小商品缩略图可用。
+  #   128-256  更严格，适合训练高质量视觉模型。
   min_width: 64
+
+  # 最小高度，单位像素。低于该值会 drop，reason=image_too_small。
+  # 通常和 min_width 保持一致。
   min_height: 64
+
+  # 最小总像素数，width * height 低于该值会 drop，reason=too_few_pixels。
+  # 4096 等价于 64x64；若希望最低 128x128，可设为 16384。
   min_pixels: 4096
+
+  # 最大长宽比。max(width/height, height/width) 超过该值会 needs_review。
+  # 常用范围：
+  #   4.0-6.0   常规图片清洗。
+  #   8.0-12.0  容忍长条图、拼接图、网页截图。
   max_aspect_ratio: 6.0
+
+  # 最小文件大小，单位字节。低于该值会 drop，reason=file_too_small。
+  # 256 主要拦截空文件、损坏文件、占位文件；更严格可设 1024 或 2048。
   min_file_size_bytes: 256
+
+  # 最大文件大小，单位字节。
+  #   null 表示不限制。
+  #   10485760 表示 10 MiB；52428800 表示 50 MiB。
+  # 超过后会 needs_review，reason=file_too_large。
+  max_file_size_bytes: null
+
+  # 允许的解码格式。Pillow 解码后会转成大写格式名再比较。
+  # 常用候选：JPEG、PNG、WEBP、BMP、TIFF。
+  # 不建议默认允许 GIF；当前流水线按静态图处理，不处理动图帧语义。
   allowed_formats: [JPEG, PNG, WEBP, BMP, TIFF]
+
   blur:
+    # 是否启用模糊检测。
+    # 模糊检测需要解码并做边缘卷积，CPU 成本高于尺寸/格式检查。
     enabled: true
+
+    # 模糊阈值。算法先转灰度，再用 FIND_EDGES 3x3 卷积提取边缘，
+    # 最后计算边缘图像素方差 blur_score；当 blur_score < 该阈值时命中 blurry。
+    #
+    # 数值含义：
+    #   越低  越保守，只抓严重模糊/几乎无边缘图片。
+    #   越高  越敏感，会抓更多轻度模糊，但也更容易误伤低纹理、白底、极简图。
+    #
+    # 经验范围：
+    #   10-20  保守，适合第一版自动清洗，只抓极端异常。
+    #   20-40  常规起点，建议 action=needs_review。
+    #   40-80  偏敏感，需要抽样复核误判。
+    #   80+    偏激进，一般不建议直接自动处理。
     edge_variance_threshold: 18.0
+
+    # 命中 blurry 后的动作。候选值：keep、needs_review、quarantine、drop。
+    # 工程上建议默认 needs_review；模糊分数受图片内容影响大，不建议第一版直接 drop。
     action: needs_review
+
   low_information:
+    # 是否启用低信息/近纯色检测。
     enabled: true
+
+    # 低信息阈值。算法会把图片转 RGB 并缩放到 64x64，
+    # 分别计算 R/G/B 三通道标准差，再取平均值 channel_stddev；
+    # 当 channel_stddev < 该阈值时命中 low_information。
+    #
+    # 数值含义：
+    #   0       基本是纯色或完全没有颜色变化。
+    #   越低    越保守，只抓纯色/近纯色。
+    #   越高    越敏感，会抓更多低对比、浅色背景、弱纹理图片。
+    #
+    # 经验范围：
+    #   2.0-4.0   保守，适合自动 quarantine。
+    #   4.0-8.0   常规到中等敏感，建议抽样复核。
+    #   8.0-12.0  偏敏感，可能误伤白底商品图、图标、简洁设计图。
+    #   12.0+     偏激进，一般不建议无复核自动处理。
     channel_stddev_threshold: 4.0
+
+    # 命中 low_information 后的动作。候选值：keep、needs_review、quarantine、drop。
+    # 纯色/低信息规则相对稳定，默认 quarantine 比直接 drop 更利于审计和恢复。
     action: quarantine
 
 thumbnail:
+  # 审核缩略图最长边尺寸，单位像素。
+  # 常用范围：128-512。越大越清晰，但占用更多磁盘和生成时间。
   size: 256
+
+  # JPEG 缩略图质量，范围通常为 1-95。
+  # 常用范围：80-90。超过 95 体积增长明显，收益有限。
   quality: 85
 
 embedding:
+  # 向量特征 provider。
+  # 当前可用：simple_color。
+  # 设计文档中的 CLIP/SigLIP/DINOv2 provider 尚未在当前代码落地。
   provider: simple_color
+
+  # 模型名/版本会写入产物摘要，帮助追踪不同 embedding 的结果。
+  # simple_color 是本地颜色直方图特征，只适合功能验证，不代表真实语义相似度。
   model_name: simple-color-histogram
   model_version: simple-color-histogram-v1
+
+  # embedding 批大小。越大吞吐越高但内存占用越大。
+  # simple_color 通常 128-1024 都可以；真实深度模型需按 GPU/显存调整。
   batch_size: 128
+
+  # 是否对向量做 L2 归一化。使用 cosine 相似度时通常应为 true。
   normalize: true
 
+  # 哪些质量状态进入 embedding/相似度/聚类。
+  # 候选值来自质量状态：keep、needs_review、quarantine、drop。
+  # 默认只处理 keep 和 needs_review，避免明显坏图进入后续语义阶段。
+  include_quality_statuses: [keep, needs_review]
+
 vector_index:
+  # 向量索引后端。当前候选值只有 faiss。
   backend: faiss
+
+  # 距离/相似度指标。当前候选值只有 cosine。
   metric: cosine
+
+  # 索引类型。当前候选值只有 hnsw_flat。
   index_type: hnsw_flat
+
+  # 每张图检索的近邻数量。
+  # 常用范围：20-200。越大越容易覆盖潜在重复/相似图，但计算和产物体积更大。
   top_k: 100
+
   hnsw:
+    # HNSW 图连接数。越大召回更好、内存更高、构建更慢。
+    # 常用范围：16-64。
     M: 32
+
+    # HNSW 构建搜索宽度。越大构建质量更高、构建更慢。
+    # 常用范围：100-400。
     ef_construction: 200
+
+    # HNSW 查询搜索宽度。越大召回更好、查询更慢。
+    # 常用范围：64-256；通常应 >= top_k 或至少接近 top_k。
     ef_search: 128
+
   rerank:
+    # 是否对 HNSW 召回结果用原始向量重新精排。
     enabled: true
+
+    # true 表示使用原始向量重新计算相似度，结果更稳。
     use_original_vectors: true
+
+    # 精排后保留的最终近邻数量。
+    # 常用范围：10-50；应 <= vector_index.top_k。
     final_top_k: 20
+
+  # 是否保存 FAISS 索引文件。true 便于复用/排查，但会占用磁盘。
   save_index: true
+
+  # 当 faiss-cpu 未安装或索引构建失败时，是否允许退回 numpy 精确检索。
+  # true 便于本地 MVP 跑通；百万级数据精确检索会非常慢。
   allow_exact_fallback: true
 
 clustering:
+  # 是否启用聚类阶段。
   enabled: true
+
+  # 聚类算法候选值：
+  #   minibatch_kmeans 适合较大数据集，速度和内存更可控。
+  #   kmeans           适合小数据集或需要更稳定聚类结果的场景。
   algorithm: minibatch_kmeans
+
+  # 聚类数量。
+  #   auto 自动根据数据量估算。
+  #   正整数 手动指定簇数，例如 100、500、1000。
   num_clusters: auto
+
+  # MiniBatchKMeans 批大小。
+  # 常用范围：1000-50000。越大越稳但内存更高。
   batch_size: 10000
+
+  # 最大迭代次数。常用范围：50-300。
   max_iter: 100
+
+  # 随机种子。固定后便于复现实验结果。
   random_state: 42
+
   outlier:
+    # 是否启用离群点检测。
     enabled: true
+
+    # 离群检测方法。当前候选值只有 distance_to_centroid。
     method: distance_to_centroid
+
+    # 距离分位阈值，范围 0-100。
+    # 99.0 表示每个簇中距离中心最远约 1% 的图片标为离群候选。
+    # 调低会产生更多离群点；调高更保守。
     percentile_threshold: 99.0
+
   duplicate_detection:
+    # 是否启用近重复检测。
     enabled: true
+
+    # embedding 相似度阈值，范围通常 0.0-1.0。
+    # cosine 下越接近 1 越相似。
+    # 常用范围：
+    #   0.95-0.98  更容易合并相似图。
+    #   0.98-0.995 更保守，偏近重复。
     embedding_threshold: 0.985
+
+    # 感知哈希汉明距离阈值。越小越严格。
+    # 常用范围：0-8；0 表示 phash 完全一致，4 是较保守的近重复起点。
     phash_hamming_threshold: 4
+
   representative:
+    # 每个簇选多少张代表图进入审核队列。
+    # 常用范围：3-10。越大覆盖更好，但审核量增加。
     samples_per_cluster: 5
 
 prelabel:
+  # 预标注 provider。
+  # 当前可用：
+  #   multimodal_api  OpenAI-compatible HTTP 接口；provider_config.mock=true 时走本地 mock。
+  #   mock/dev_mock   本地 mock provider，用于功能验证。
   provider: multimodal_api
+
   provider_config:
+    # API 风格。当前实现按 openai_compatible 组织请求。
     api_style: openai_compatible
+
+    # 多模态模型名。mock=true 时该值只用于记录。
+    # 真实调用时也可写成 ${MULTIMODAL_API_MODEL} 从环境变量注入。
     model: local-mock
+
+    # true 表示不请求外部服务，使用本地 mock 结果；适合离线功能验证。
+    # false 时需要配置 base_url 和 API key 环境变量。
     mock: true
+
+    # 真实 API 请求超时时间，单位秒。常用范围：30-180。
     timeout_seconds: 60
+
+    # API 失败重试次数。常用范围：0-5。
     max_retries: 3
+
+    # 请求限速，单位 QPS。常用范围取决于供应商额度。
     rate_limit_qps: 2
+
+    # mock=false 时通常需要：
+    # base_url: ${MULTIMODAL_API_BASE_URL}
+    # api_key_env: MULTIMODAL_API_KEY
+
+  # 每张图保留几个候选标签。
+  # 常用范围：1-5；single_label 任务通常 3 足够用于后续 margin 判断。
   top_k: 3
 
+  # prompt 版本号，便于追踪 prompt 改动带来的结果差异。
+  # null 表示不显式指定。
+  prompt_version: null
+
 auto_decision:
+  # 自动采用的最低置信度，范围 0.0-1.0。
+  # 越高越保守；生产中通常从 0.85-0.95 起步。
   min_confidence: 0.9
+
+  # 第一候选和第二候选的最小置信度差，范围 0.0-1.0。
+  # 值越大，越要求模型判断明确。
   min_margin: 0.15
+
+  # 如果要求簇一致，簇内主标签占比至少达到该值才自动采用。
+  # 范围 0.0-1.0；常用 0.7-0.9。
   min_cluster_main_label_ratio: 0.8
+
+  # 是否要求聚类上下文也支持当前标签。
+  # true 更保守，能减少孤立误判。
   require_cluster_consistency: true
+
+  # 是否阻止 high_risk=true 的标签被自动采用。
+  # true 表示高风险标签必须人工复核。
   block_high_risk_labels: true
 
 review:
+  # 是否启用审核队列。当前第一版要求 true；设为 false 会校验失败。
   enabled: true
+
   queue:
+    # 是否把低置信度预标注加入审核队列。
     include_low_confidence: true
+
+    # 是否把聚类离群点加入审核队列。
     include_outliers: true
+
+    # 是否把每个簇的代表图加入审核队列。
     include_cluster_representatives: true
+
+    # 是否把近重复但标签冲突的图片加入审核队列。
     include_duplicate_conflicts: true
+
   sampling:
+    # 自动采用结果中抽样质检比例，范围 0.0-1.0。
+    # 0.02 表示约 2% 的自动采用样本仍进入 QA 抽检。
     auto_accept_qa_ratio: 0.02
+
+    # 每个簇进入审核的代表样本数。
+    # 通常与 clustering.representative.samples_per_cluster 接近。
     per_cluster_representatives: 3
+
   batch_actions:
+    # 是否允许对近重复组批量接受同一结果。
     allow_duplicate_group_accept: true
+
+    # 是否允许对整个簇批量接受同一结果。
+    # 默认 false，避免一个错误扩散到整个簇。
     allow_cluster_accept: false
+
+    # 单次批量操作最大图片数。常用范围：100-1000。
     max_batch_size: 500
 
 acceptance:
+  # 自动采用部分的目标精度，范围 0.0-1.0。
+  # 仅用于报告/验收口径，不会自动改变模型输出。
   auto_accept_precision_target: 0.98
+
+  # 最终结果目标精度，范围 0.0-1.0。
   final_precision_target: 0.99
+
+  # 每个核心标签最少抽检样本数。样本太少时验收结论不稳定。
   min_samples_per_core_label: 50
+
+  # true 表示只生成报告，不因验收未达标而阻断导出。
+  # false 可用于未来更严格的生产门禁。
   report_only: true
 
 output:
+  # 只包含最终有效标注的 JSONL 文件名，写入 export artifact 目录。
   valid_only_file: valid_annotations.jsonl
+
+  # 全量结果 JSONL 文件名，包含 keep/review/drop/quarantine 等状态和中间信息。
   full_file: final_annotations.jsonl
 
 runtime:
+  # 每个阶段摘要中保留的样例行数。只影响 sample artifact，不影响全量结果。
+  # 常用范围：10-100。
   sample_limit: 20
+
+  # 日志级别。常用候选：DEBUG、INFO、WARNING、ERROR。
   log_level: INFO
+
+  # quality_check 并发执行器。
+  # 候选值：
+  #   process  多进程，适合图片解码/模糊检测等 CPU 密集任务，默认推荐。
+  #   thread   多线程，适合 IO 等待较多或调试场景；CPU 密集任务受 GIL 影响较大。
   quality_check_executor: process
+
+  # quality_check worker 数量。必须 >= 1。
+  # 常用设置：
+  #   1      顺序执行，便于调试。
+  #   4-8    通用服务器起点。
+  #   CPU 核数的 50%-100% 适合重 CPU 检测，但要观察负载和磁盘 IO。
   quality_check_workers: 8
+
+  # quality_check 分片大小。必须 >= 1。
+  # 每个 shard 成功后会留下 checkpoint，用于失败恢复。
+  # 常用范围：
+  #   1000-5000   恢复粒度细，checkpoint 文件更多。
+  #   10000-50000 吞吐更稳，失败后重跑粒度更粗。
   quality_check_shard_size: 10000
+
+  # 恢复时是否复用已成功且配置哈希匹配的 quality_check shard。
+  # true 适合百万级任务；false 会强制重跑全部质量检测。
   quality_check_resume_shards: true
+
+  # 对仍需要内存加载的阶段设置行数保护。必须 >= 1。
+  # 超过后阶段会报错，避免机器被大数据量一次性打爆。
+  # 常用范围：100000-1000000；后续应继续把更多阶段改成流式/分片。
   max_in_memory_rows: 500000
