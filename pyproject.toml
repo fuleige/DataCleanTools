@@ -23,6 +23,12 @@ dependencies = [
 
 [project.optional-dependencies]
 faiss = ["faiss-cpu>=1.8"]
+faiss-gpu = ["faiss-gpu-cu12>=1.13.2"]
+deep = [
+  "safetensors>=0.4",
+  "torch>=2.3",
+  "transformers>=4.49",
+]
 dev = ["pytest>=8.2"]
 
 [project.scripts]

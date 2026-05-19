@@ -143,6 +143,7 @@ class EmbeddingConfig(StrictModel):
     batch_size: int = 128
     normalize: bool = True
     include_quality_statuses: list[str] = Field(default_factory=lambda: ["keep", "needs_review"])
+    provider_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class HnswConfig(StrictModel):

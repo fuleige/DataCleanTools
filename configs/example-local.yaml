@@ -212,17 +212,21 @@ thumbnail:
 
 embedding:
   # 向量特征 provider。
-  # 当前可用：simple_color。
-  # 设计文档中的 CLIP/SigLIP/DINOv2 provider 尚未在当前代码落地。
+  # 当前可用：
+  #   simple_color  本地颜色直方图特征，用于功能验证。
+  #   siglip2       Hugging Face SigLIP/SigLIP2 图像特征，用于真实语义嵌入。
   provider: simple_color
 
   # 模型名/版本会写入产物摘要，帮助追踪不同 embedding 的结果。
   # simple_color 是本地颜色直方图特征，只适合功能验证，不代表真实语义相似度。
+  # provider=siglip2 时，model_name 建议写本地模型目录或 Hugging Face 模型 ID。
+  # 示例：/data/imgsrch/models/siglip2-base。
   model_name: simple-color-histogram
   model_version: simple-color-histogram-v1
 
   # embedding 批大小。越大吞吐越高但内存占用越大。
-  # simple_color 通常 128-1024 都可以；真实深度模型需按 GPU/显存调整。
+  # simple_color 通常 128-1024 都可以。
+  # siglip2 需要按 GPU 显存调整；224 输入的 base 模型可从 128 或 256 起步。
   batch_size: 128
 
   # 是否对向量做 L2 归一化。使用 cosine 相似度时通常应为 true。
@@ -232,6 +236,25 @@ embedding:
   # 候选值来自质量状态：keep、needs_review、quarantine、drop。
   # 默认只处理 keep 和 needs_review，避免明显坏图进入后续语义阶段。
   include_quality_statuses: [keep, needs_review]
+
+  # provider 额外参数。
+  # simple_color 不需要额外参数，保留空对象即可。
+  #
+  # siglip2 常用配置示例：
+  # provider_config:
+  #   model_path: /data/imgsrch/models/siglip2-base
+  #   device: cuda:0
+  #   dtype: float16
+  #   local_files_only: true
+  #   trust_remote_code: false
+  #
+  # 字段含义：
+  #   model_path/pretrained_model_name_or_path  本地模型目录或 Hugging Face 模型 ID。
+  #   device    auto、cpu、cuda、cuda:0、cuda:1 等；auto 会优先使用 cuda。
+  #   dtype     auto、float16、bfloat16、float32；GPU 通常用 float16。
+  #   local_files_only  true 时只读本地模型缓存，不访问网络。
+  #   trust_remote_code 默认 false；只有明确信任模型仓库自定义代码时才设 true。
+  provider_config: {}
 
 vector_index:
   # 向量索引后端。当前候选值只有 faiss。

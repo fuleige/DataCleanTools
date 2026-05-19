@@ -14,6 +14,58 @@
 
 - `/data/envs/dataclean-tools/bin/image-labeling config validate -c configs/example-local.yaml` 通过。
 
+## 2026-05-14 百万级 embedding 流式写入
+
+### 已完成
+
+- `embedding` 阶段改为两遍流式处理 `quality_results.jsonl`：先统计可嵌入候选，再按 `embedding.batch_size` 批量编码。
+- embedding 向量改为通过 numpy memmap 直接写入 `.npy`，`ids.json` 和 `embedding_refs.jsonl` 也改为流式写入，避免一次性加载百万级质量结果。
+- `embedding` 阶段增加候选扫描和编码进度上报，可直接在跳过 `thumbnail` 的情况下从已完成 `quality_check` 的 run 上执行。
+- 补充回归测试，验证 `runtime.max_in_memory_rows` 小于质量结果行数时 embedding 仍可运行。
+
+### 已验证
+
+- `/data/envs/dataclean-tools/bin/python -m pytest` 通过，结果为 `5 passed`。
+- `/data/envs/dataclean-tools/bin/image-labeling config validate -c configs/example-local.yaml` 通过。
+- `git diff --check` 通过。
+
+## 2026-05-19 提交前检查
+
+### 已验证
+
+- 当前检查未运行 CUDA/GPU 程序；Python 验证命令均显式设置 `CUDA_VISIBLE_DEVICES=`，避免影响机器上已有 GPU 任务。
+- `git diff --check` 通过。
+- `tools/build_faiss_gpu_index.py`、`tools/extract_siglip2_embeddings.py`、`tools/benchmark_siglip2_embedding.py` 通过 `py_compile` 语法检查。
+- `/data/envs/dataclean-tools/bin/image-labeling config validate -c configs/example-local.yaml` 通过。
+- `/data/envs/dataclean-tools/bin/python -m pytest` 通过，结果为 `5 passed`，存在 3 个 faiss/swig 相关既有 warning。
+
+## 2026-05-14 SigLIP2 深度学习 embedding provider
+
+### 已完成
+
+- 新增 `embedding.provider=siglip2`，通过 Hugging Face `AutoImageProcessor` 和 `AutoModel` 加载本地或远程 SigLIP/SigLIP2 模型。
+- `EmbeddingConfig` 增加 `provider_config`，支持配置 `model_path`、`device`、`dtype`、`local_files_only` 和 `trust_remote_code`。
+- 新增 `deep` 可选依赖组，包含 `torch`、`transformers` 和 `safetensors`。
+- `configs/example-local.yaml` 增加 SigLIP2 provider 的配置示例、字段含义和建议批大小。
+- `tools/benchmark_siglip2_embedding.py` 支持 SigLIP/SigLIP2 多进程多 GPU 压测，可选择 full model 或 vision-only model，并可重复指定同一 GPU 以测试每卡多 worker 并发。
+- `tools/extract_siglip2_embeddings.py` 支持从 clean manifest 执行 SigLIP2 vision-only 多进程多 GPU 向量提取，直接写出兼容的 `embeddings.npy`、`ids.json` 和 `embedding_refs.jsonl`。
+- `tools/build_faiss_gpu_index.py` 支持使用 FAISS GPU 构建 IVF-Flat 索引，默认只建索引并保存 `faiss_ivf_flat.index` 和 `index_metadata.json`；可选 `--write-candidates` 时再按 batch 搜索并流式写候选 JSONL。
+- `pyproject.toml` 增加 `faiss-gpu` 可选依赖组，当前 `/data/envs/dl` 已安装并验证 `faiss-gpu-cu12==1.13.2`。
+
+### 已验证
+
+- `/data/envs/dl` 已验证可用：`torch 2.11.0+cu126`、`transformers 5.8.0`、`safetensors`，CUDA 可见 4 张 NVIDIA GeForce RTX 4090 D。
+- 本地 `/data/imgsrch/models/siglip2-base` 最小推理通过，8 张图片输出归一化 float32 向量，shape 为 `[8, 768]`。
+- 使用 clean manifest 抽样完成 4 卡性能基准；full model 单进程/卡在线程池限制为 1 且 batch/GPU=512 时，8192 张样本吞吐约 1382 img/s。
+- vision-only 多进程压测中，32 workers 总数、每卡 8 进程、每 worker batch=128、CPU 数值线程池限制为 1 时，1048576 张样本吞吐约 8268 img/s，不含模型加载的 2591127 张 clean 图片预计纯提取约 5.2 分钟；压测期间 4 张 RTX 4090 D 均可达到 100% GPU utilization。
+- 已对比 batch=256 和 48 workers：batch=256 未提升吞吐，48 workers 相比 32 workers 没有明确收益且单 worker 吞吐明显下降。当前推荐压测配置为 32 workers、每卡 8 进程、batch=128。
+- 已对 MEP-3M clean manifest 执行全量 SigLIP2 embedding 提取：2591127 张图片全部成功，失败 0，输出向量 shape `(2591127, 768)`，保存为 float32 归一化向量；32 workers、每卡 8 进程、batch=128 的端到端耗时约 443 秒，包含向量和元数据写入，吞吐约 5846 img/s。
+- FAISS GPU 环境已验证：`/data/envs/dl` 中 `faiss-gpu-cu12==1.13.2` 可见 4 张 GPU，提供 `StandardGpuResources`、`index_cpu_to_gpu_multiple_py` 和 `index_gpu_to_cpu`。
+- 已用 4096 条真实 embedding 做 GPU IVF-Flat 烟测：单 GPU、`nlist=128`、`nprobe=16` 可完成训练、添加、索引保存和候选 JSONL 流式输出。
+- 注意：当前正式 `embedding` stage 已支持流式写入，但尚未把多进程多 GPU 调度和 vision-only 快速路径完整合并到 `stage run embedding`；本次全量提取通过 `tools/extract_siglip2_embeddings.py` 落盘，并已手动同步 run state、summary 和 artifact index。
+- 注意：正式 `vector_index` stage 当前仍是 CPU HNSW 路径；GPU IVF-Flat 索引构建先通过 `tools/build_faiss_gpu_index.py` 执行。后续应把 GPU IVF 配置合并进 `VectorIndexConfig` 和 `run_vector_index`，并将“建索引”和“候选检索”拆成可恢复的两个子阶段。
+- 如需把深度学习栈同步到 `/data/envs/dataclean-tools`，安装命令必须继续使用 `env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy -u ALL_PROXY -u all_proxy ...`，非 PyTorch 包优先走国内镜像；PyTorch CUDA wheel 仍主要依赖官方 CUDA wheel 源或复用已有 `/data/envs/dl`。
+
 ## 2026-05-11 第一版本地 MVP
 
 ### 本版本定位

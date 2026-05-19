@@ -729,53 +729,174 @@ def run_thumbnail(ctx: RunContext) -> None:
 
 def run_embedding(ctx: RunContext) -> None:
     quality_path = ctx.path("data", "quality_results.jsonl")
-    _ensure_in_memory_row_limit(ctx, "embedding", quality_path)
-    quality_rows = read_jsonl(quality_path)
-    candidates = [
-        row
-        for row in quality_rows
-        if row["quality_status"] in set(ctx.config.embedding.include_quality_statuses) and row.get("local_path")
-    ]
+    include_statuses = set(ctx.config.embedding.include_quality_statuses)
+    batch_size = max(1, ctx.config.embedding.batch_size)
     provider = build_embedding_provider(ctx.config.embedding)
-    image_paths = [Path(row["local_path"]) for row in candidates]
-    vectors = provider.encode(image_paths) if image_paths else np.zeros((0, 0), dtype=np.float32)
 
     embedding_dir = ctx.path("embeddings")
     embedding_dir.mkdir(parents=True, exist_ok=True)
     vector_path = embedding_dir / "embeddings.npy"
+    vector_tmp_path = embedding_dir / "embeddings.tmp.npy"
     id_path = embedding_dir / "ids.json"
+    id_tmp_path = embedding_dir / "ids.tmp.json"
     refs_path = embedding_dir / "embedding_refs.jsonl"
-    np.save(vector_path, vectors)
-    write_json(id_path, [row["image_id"] for row in candidates])
-    ref_rows = [
-        {
-            "image_id": row["image_id"],
-            "uri": row["uri"],
-            "local_path": row["local_path"],
-            "quality_status": row["quality_status"],
-            "row_index": idx,
-            "embedding_uri": ctx.uri(vector_path),
-        }
-        for idx, row in enumerate(candidates)
-    ]
-    write_jsonl(refs_path, ref_rows)
-    record_data_artifact(ctx, "embeddings", "embedding", vector_path, int(vectors.shape[0]))
-    record_data_artifact(ctx, "embedding_ids", "embedding", id_path, len(candidates))
-    record_data_artifact(ctx, "embedding_refs", "embedding", refs_path, len(ref_rows))
+    refs_tmp_path = embedding_dir / "embedding_refs.tmp.jsonl"
+    sample_rows: list[dict[str, Any]] = []
+
+    scan_key = "embedding_candidate_scan"
+    total_rows = 0
+    candidate_count = 0
+    skipped_non_local = 0
+    last_reported = 0
+    ctx.report_progress("task_started", key=scan_key, description="scan embedding candidates", total=None)
+    ctx.update_stage_progress("embedding", processed_items=0, progress_phase="candidate_scan")
+    for row in _iter_jsonl_rows(quality_path):
+        total_rows += 1
+        if total_rows % PROGRESS_INTERVAL == 0:
+            ctx.report_progress("task_advance", key=scan_key, advance=total_rows - last_reported)
+            ctx.update_stage_progress(
+                "embedding",
+                processed_items=total_rows,
+                matched_items=candidate_count,
+                progress_phase="candidate_scan",
+            )
+            last_reported = total_rows
+        if row["quality_status"] not in include_statuses:
+            continue
+        if not row.get("local_path"):
+            skipped_non_local += 1
+            continue
+        candidate_count += 1
+    if total_rows > last_reported:
+        ctx.report_progress("task_advance", key=scan_key, advance=total_rows - last_reported)
+    ctx.report_progress(
+        "task_completed",
+        key=scan_key,
+        description=f"scan embedding candidates ({candidate_count} images)",
+        completed=total_rows,
+    )
+
+    encode_key = "embedding_images"
+    ctx.report_progress("task_started", key=encode_key, description="embed images", total=candidate_count)
+    ctx.update_stage_progress(
+        "embedding",
+        processed_items=0,
+        total_items=candidate_count,
+        matched_items=candidate_count,
+        progress_phase="embed_images",
+    )
+
+    batch_rows: list[dict[str, Any]] = []
+    batch_paths: list[Path] = []
+    vector_memmap: np.memmap | None = None
+    vector_dimension = 0
+    output_index = 0
+    shard_count = 0
+    last_encoded_reported = 0
+
+    def flush_batch(ids_f: TextIO, refs_f: TextIO, *, final: bool = False) -> None:
+        nonlocal batch_rows, batch_paths, vector_memmap, vector_dimension, output_index, shard_count, last_encoded_reported
+        if not batch_rows:
+            return
+        vectors = provider.encode(batch_paths)
+        if vectors.ndim != 2:
+            raise RuntimeError(f"embedding provider returned non-2D vectors with shape={vectors.shape}")
+        if int(vectors.shape[0]) != len(batch_rows):
+            raise RuntimeError(
+                f"embedding provider returned {vectors.shape[0]} vectors for {len(batch_rows)} input images"
+            )
+        if vector_memmap is None:
+            vector_dimension = int(vectors.shape[1])
+            vector_memmap = np.lib.format.open_memmap(
+                vector_tmp_path,
+                mode="w+",
+                dtype=np.float32,
+                shape=(candidate_count, vector_dimension),
+            )
+        end_index = output_index + int(vectors.shape[0])
+        vector_memmap[output_index:end_index] = vectors.astype(np.float32)
+        for row_idx, row in enumerate(batch_rows, start=output_index):
+            if row_idx:
+                ids_f.write(",")
+            ids_f.write(json.dumps(row["image_id"], ensure_ascii=False))
+            ref_row = {
+                "image_id": row["image_id"],
+                "uri": row["uri"],
+                "local_path": row["local_path"],
+                "quality_status": row["quality_status"],
+                "row_index": row_idx,
+                "embedding_uri": ctx.uri(vector_path),
+            }
+            refs_f.write(json.dumps(ref_row, ensure_ascii=False, sort_keys=True))
+            refs_f.write("\n")
+            if len(sample_rows) < ctx.config.runtime.sample_limit:
+                sample_rows.append(ref_row)
+        output_index = end_index
+        shard_count += 1
+        if output_index - last_encoded_reported >= PROGRESS_INTERVAL or final:
+            ctx.report_progress("task_advance", key=encode_key, advance=output_index - last_encoded_reported)
+            ctx.update_stage_progress(
+                "embedding",
+                processed_items=output_index,
+                total_items=candidate_count,
+                progress_phase="embed_images",
+            )
+            last_encoded_reported = output_index
+        batch_rows = []
+        batch_paths = []
+
+    if candidate_count == 0:
+        np.save(vector_tmp_path, np.zeros((0, 0), dtype=np.float32))
+        id_tmp_path.write_text("[]\n", encoding="utf-8")
+        refs_tmp_path.write_text("", encoding="utf-8")
+    else:
+        with id_tmp_path.open("w", encoding="utf-8") as ids_f, refs_tmp_path.open("w", encoding="utf-8") as refs_f:
+            ids_f.write("[")
+            for row in _iter_jsonl_rows(quality_path):
+                if row["quality_status"] not in include_statuses or not row.get("local_path"):
+                    continue
+                batch_rows.append(row)
+                batch_paths.append(Path(row["local_path"]))
+                if len(batch_rows) >= batch_size:
+                    flush_batch(ids_f, refs_f)
+            flush_batch(ids_f, refs_f, final=True)
+            ids_f.write("]\n")
+        if vector_memmap is not None:
+            vector_memmap.flush()
+            del vector_memmap
+
+    vector_tmp_path.replace(vector_path)
+    id_tmp_path.replace(id_path)
+    refs_tmp_path.replace(refs_path)
+
+    ctx.report_progress(
+        "task_completed",
+        key=encode_key,
+        description=f"embed images ({output_index} vectors)",
+        completed=output_index,
+        total=candidate_count,
+    )
+
+    record_data_artifact(ctx, "embeddings", "embedding", vector_path, output_index)
+    record_data_artifact(ctx, "embedding_ids", "embedding", id_path, output_index)
+    record_data_artifact(ctx, "embedding_refs", "embedding", refs_path, output_index)
 
     summary = {
         "stage": "embedding",
         "provider": ctx.config.embedding.provider,
         "model_name": ctx.config.embedding.model_name,
         "model_version": ctx.config.embedding.model_version,
-        "dimension": int(vectors.shape[1]) if vectors.ndim == 2 and vectors.shape[0] else 0,
-        "input_count": len(quality_rows),
-        "success_count": int(vectors.shape[0]),
+        "dimension": vector_dimension,
+        "input_count": total_rows,
+        "candidate_count": candidate_count,
+        "success_count": output_index,
         "failed_count": 0,
-        "shard_count": 1 if vectors.shape[0] else 0,
+        "skipped_non_local_count": skipped_non_local,
+        "batch_size": batch_size,
+        "shard_count": shard_count,
         "embedding_uri": ctx.uri(vector_path),
     }
-    ctx.write_stage_outputs("embedding", summary, sample=ref_rows[: ctx.config.runtime.sample_limit], errors=[])
+    ctx.write_stage_outputs("embedding", summary, sample=sample_rows, errors=[])
 
 
 def run_vector_index(ctx: RunContext) -> None:

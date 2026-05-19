@@ -79,6 +79,33 @@ def test_quality_check_reuses_completed_shards(tmp_path: Path) -> None:
     assert resumed.path("data", "quality_results.jsonl").exists()
 
 
+def test_embedding_streams_past_in_memory_row_limit(tmp_path: Path) -> None:
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    for idx, color in enumerate([(255, 0, 0), (0, 255, 0), (0, 0, 255)], start=1):
+        Image.new("RGB", (96, 96), color=color).save(image_dir / f"{idx}.jpg")
+
+    config = load_config("configs/example-local.yaml")
+    config.input.local_dir = str(image_dir)
+    config.storage.artifact_store.root_uri = (tmp_path / "artifacts").as_uri()
+    config.quality.low_information.enabled = False
+    config.quality.blur.enabled = False
+    config.runtime.quality_check_workers = 2
+    config.runtime.quality_check_shard_size = 2
+    config.runtime.max_in_memory_rows = 1
+
+    ctx = start_run(config, until="quality_check")
+    embedded = run_single_stage(ctx.run_id, "embedding", artifact_root=(tmp_path / "artifacts").as_uri())
+    summary = read_json(embedded.summary_path("embedding"))
+
+    assert summary["input_count"] == 3
+    assert summary["candidate_count"] == 3
+    assert summary["success_count"] == 3
+    assert summary["dimension"] == 64
+    assert embedded.path("embeddings", "embeddings.npy").exists()
+    assert len(read_json(embedded.path("embeddings", "ids.json"))) == 3
+
+
 def test_resume_respects_start_until_boundary(tmp_path: Path) -> None:
     image_dir = tmp_path / "images"
     image_dir.mkdir()
